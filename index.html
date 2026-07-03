@@ -13,22 +13,19 @@
   textarea, input, button { font-family: inherit; }
 </style>
 
-<!-- Firebase (realtime backend). Runs on your hosted site, not inside any sandbox. -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
   import { getFirestore, doc, setDoc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
   import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
-  // ▼▼▼ วางค่า config ของโปรเจกต์ Firebase ของคุณตรงนี้ (ดูวิธีใน README) ▼▼▼
   const firebaseConfig = {
-  apiKey: "AIzaSyA1DIpl0ZD-ox-SDRFmNPAsHdlYctEx4nA",
-  authDomain: "wtf-fifa-2026.firebaseapp.com",
-  projectId: "wtf-fifa-2026",
-  storageBucket: "wtf-fifa-2026.firebasestorage.app",
-  messagingSenderId: "162163945307",
-  appId: "1:162163945307:web:010519882adecfbf0a747e"
-};
-  // ▲▲▲ วางค่า config ด้านบน ▲▲▲
+    apiKey: "AIzaSyA1DIpl0ZD-ox-SDRFmNPAsHdlYctEx4nA",
+    authDomain: "wtf-fifa-2026.firebaseapp.com",
+    projectId: "wtf-fifa-2026",
+    storageBucket: "wtf-fifa-2026.firebasestorage.app",
+    messagingSenderId: "162163945307",
+    appId: "1:162163945307:web:010519882adecfbf0a747e",
+  };
 
   try {
     const app = initializeApp(firebaseConfig);
@@ -97,60 +94,63 @@ const FINAL_WEIGHT = 16;
 const AVATAR_COLORS = ["#D4AF37", "#5DCAA5", "#D85A30", "#7F77DD", "#378ADD", "#D4537E"];
 const THAI_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
 
-// Kickoff schedule. Edit these, or feed from a live-score API later.
-const R0_DATES = ["2026-06-28", "2026-06-28", "2026-06-29", "2026-06-29", "2026-06-30", "2026-06-30", "2026-07-03", "2026-07-04"];
-const R1_DATES = ["2026-07-05", "2026-07-05", "2026-07-06", "2026-07-06"];
-const R2_DATES = ["2026-07-09", "2026-07-10"];
-const R3_DATES = ["2026-07-14"];
-const FINAL_DATE = "2026-07-19";
-const timeFor = (i) => ["23:00", "02:00"][i % 2];
+// เวลาเตะ + สถานะ มาจาก Firestore (ตัว auto-updater ดึงจาก API มาให้)
+// ค่า hardcode ด้านล่างเป็นแค่ fallback กรณียังไม่มีข้อมูลจาก API
 const FIXTURES = {};
-["left", "right"].forEach((side) => {
-  R0_DATES.forEach((d, i) => (FIXTURES[`${side}-0-${i}`] = `${d}T${timeFor(i)}:00`));
-  R1_DATES.forEach((d, i) => (FIXTURES[`${side}-1-${i}`] = `${d}T${timeFor(i)}:00`));
-  R2_DATES.forEach((d, i) => (FIXTURES[`${side}-2-${i}`] = `${d}T${timeFor(i)}:00`));
-  R3_DATES.forEach((d, i) => (FIXTURES[`${side}-3-${i}`] = `${d}T${timeFor(i)}:00`));
-});
-FIXTURES["final"] = `${FINAL_DATE}T23:00:00`;
 
 const tsOf = (iso) => new Date(iso).getTime();
 function fmtDate(iso) {
   const d = new Date(iso);
   return `${d.getDate()} ${THAI_MONTHS[d.getMonth()]} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
-function slotStatus(key, actual, nowTs) {
-  const iso = FIXTURES[key];
+
+// สถานะแมทช์ — ยึดสถานะจาก API ก่อน ถ้าไม่มีค่อย fallback เป็นเวลา/ผู้ชนะ
+function slotStatus(key, actual, sched, nowTs) {
+  const iso = (sched.fixtures && sched.fixtures[key]) || FIXTURES[key] || null;
+  const apiStatus = sched.statuses && sched.statuses[key];
   const winner = actual[key] || null;
-  if (!iso) return { state: "upcoming", winner, iso };
-  const past = tsOf(iso) <= nowTs;
-  if (past && winner) return { state: "finished", winner, iso };
-  if (past && !winner) return { state: "live", winner: null, iso };
-  return { state: "upcoming", winner: null, iso };
+
+  if (apiStatus) {
+    if (apiStatus === "FINISHED" || apiStatus === "AWARDED") {
+      if (winner) return { state: "finished", winner, iso };
+      return { state: "live", winner: null, iso };
+    }
+    if (apiStatus === "IN_PLAY" || apiStatus === "PAUSED" || apiStatus === "SUSPENDED") {
+      return { state: "live", winner: null, iso };
+    }
+    return { state: "upcoming", winner: null, iso }; // TIMED / SCHEDULED / POSTPONED
+  }
+
+  // fallback (ไม่มีข้อมูลจาก API สำหรับคู่นี้)
+  if (winner) return { state: "finished", winner, iso };       // ผลที่กรอกมือ
+  if (!iso) return { state: "upcoming", winner: null, iso };
+  return tsOf(iso) <= nowTs ? { state: "live", winner: null, iso } : { state: "upcoming", winner: null, iso };
 }
-function advancer(key, pick, actual, nowTs) {
-  const st = slotStatus(key, actual, nowTs);
+
+function advancer(key, pick, actual, sched, nowTs) {
+  const st = slotStatus(key, actual, sched, nowTs);
   if (st.state === "finished") return st.winner;
   if (st.state === "live") return null;
   return pick[key] || null;
 }
-function buildRounds(pairs, side, pick, actual, nowTs) {
+function buildRounds(pairs, side, pick, actual, sched, nowTs) {
   const rounds = [pairs.map(([t1, t2]) => ({ team1: t1, team2: t2 }))];
   for (let r = 0; r < 3; r++) {
     const prev = rounds[r]; const next = [];
     for (let i = 0; i < prev.length; i += 2) {
       next.push({
-        team1: advancer(`${side}-${r}-${i}`, pick, actual, nowTs),
-        team2: advancer(`${side}-${r}-${i + 1}`, pick, actual, nowTs),
+        team1: advancer(`${side}-${r}-${i}`, pick, actual, sched, nowTs),
+        team2: advancer(`${side}-${r}-${i + 1}`, pick, actual, sched, nowTs),
       });
     }
     rounds.push(next);
   }
   return rounds;
 }
-function computeScore(pick, actual, nowTs) {
+function computeScore(pick, actual, sched, nowTs) {
   let score = 0, correct = 0, decided = 0;
   const grade = (key, w) => {
-    const st = slotStatus(key, actual, nowTs);
+    const st = slotStatus(key, actual, sched, nowTs);
     if (st.state === "finished") { decided++; if (pick[key] && pick[key] === st.winner) { score += w; correct++; } }
   };
   ["left", "right"].forEach((side) => {
@@ -194,8 +194,8 @@ function StatusLine({ st, mode, myPick }) {
   return <div style={{ fontFamily: "'Work Sans', sans-serif", fontSize: 11, color, marginTop: 2, display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 10 }}>{icon}</span>{text}</div>;
 }
 
-function SlotMatch({ sideKey, team1, team2, pick, actual, nowTs, mode, onPick }) {
-  const st = slotStatus(sideKey, actual, nowTs);
+function SlotMatch({ sideKey, team1, team2, pick, actual, sched, nowTs, mode, onPick }) {
+  const st = slotStatus(sideKey, actual, sched, nowTs);
   const myPick = pick[sideKey] || null;
   const both = !!(team1 && team2);
   const props = (team) => {
@@ -218,11 +218,11 @@ function SlotMatch({ sideKey, team1, team2, pick, actual, nowTs, mode, onPick })
   );
 }
 
-function BracketList({ pick, actual, nowTs, mode, onSelect }) {
-  const L = buildRounds(LEFT_PAIRS, "left", pick, actual, nowTs);
-  const R = buildRounds(RIGHT_PAIRS, "right", pick, actual, nowTs);
-  const lf = advancer("left-3-0", pick, actual, nowTs);
-  const rf = advancer("right-3-0", pick, actual, nowTs);
+function BracketList({ pick, actual, sched, nowTs, mode, onSelect }) {
+  const L = buildRounds(LEFT_PAIRS, "left", pick, actual, sched, nowTs);
+  const R = buildRounds(RIGHT_PAIRS, "right", pick, actual, sched, nowTs);
+  const lf = advancer("left-3-0", pick, actual, sched, nowTs);
+  const rf = advancer("right-3-0", pick, actual, sched, nowTs);
   return (
     <div>
       <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 12 }}>
@@ -243,7 +243,7 @@ function BracketList({ pick, actual, nowTs, mode, onSelect }) {
                 <div key={side} style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 10, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>{side === "left" ? "สายซ้าย" : "สายขวา"}</div>
                   {rounds[r].map((m, i) => (
-                    <SlotMatch key={i} sideKey={`${side}-${r}-${i}`} team1={m.team1} team2={m.team2} pick={pick} actual={actual} nowTs={nowTs} mode={mode} onPick={(t) => onSelect(side, r, i, t, false)} />
+                    <SlotMatch key={i} sideKey={`${side}-${r}-${i}`} team1={m.team1} team2={m.team2} pick={pick} actual={actual} sched={sched} nowTs={nowTs} mode={mode} onPick={(t) => onSelect(side, r, i, t, false)} />
                   ))}
                 </div>
               );
@@ -253,7 +253,7 @@ function BracketList({ pick, actual, nowTs, mode, onSelect }) {
       ))}
       <div id="sec-final" style={{ marginBottom: 8 }}>
         <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 14, fontWeight: 600, color: COLORS.gold, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10, paddingTop: 4 }}>🏆 รอบชิงชนะเลิศ</div>
-        <SlotMatch sideKey="final" team1={lf} team2={rf} pick={pick} actual={actual} nowTs={nowTs} mode={mode} onPick={(t) => onSelect(null, null, null, t, true)} />
+        <SlotMatch sideKey="final" team1={lf} team2={rf} pick={pick} actual={actual} sched={sched} nowTs={nowTs} mode={mode} onPick={(t) => onSelect(null, null, null, t, true)} />
       </div>
     </div>
   );
@@ -296,6 +296,7 @@ function App() {
   const [profile, setProfile] = useState(null);
   const [selections, setSelections] = useState({});
   const [actual, setActual] = useState({});
+  const [sched, setSched] = useState({ fixtures: {}, statuses: {} });
   const [players, setPlayers] = useState([]);
   const [tab, setTab] = useState("predict");
   const [viewingFriend, setViewingFriend] = useState(null);
@@ -327,7 +328,10 @@ function App() {
         hydrated.current = true;
       }
     });
-    const unsubA = window.__fb.subActual((data) => setActual(data.selections || {}));
+    const unsubA = window.__fb.subActual((data) => {
+      setActual(data.selections || {});
+      setSched({ fixtures: data.fixtures || {}, statuses: data.statuses || {} });
+    });
     return () => { unsubP && unsubP(); unsubA && unsubA(); };
   }, [fbReady, profile]);
 
@@ -364,13 +368,12 @@ function App() {
     window.__fb.setActual({ selections: next, updatedAt: Date.now(), editedBy: profile?.name || "" }).catch(() => {});
   });
 
-  // merge self into player list for immediate feedback
   const merged = {};
   players.forEach((p) => (merged[p.id] = p));
   if (profile) merged[profile.id] = { id: profile.id, name: profile.name, selections };
   const allPlayers = Object.values(merged);
 
-  const leaderboard = allPlayers.map((f) => ({ ...f, ...computeScore(f.selections || {}, actual, nowTs) }))
+  const leaderboard = allPlayers.map((f) => ({ ...f, ...computeScore(f.selections || {}, actual, sched, nowTs) }))
     .sort((a, b) => b.score - a.score || b.correct - a.correct);
   const myRank = profile ? leaderboard.findIndex((f) => f.id === profile.id) + 1 : 0;
 
@@ -392,7 +395,7 @@ function App() {
   const wrap = (children) => <div style={{ background: COLORS.navy, borderRadius: 16, maxWidth: 420, margin: "0 auto", minHeight: "100vh" }}>{children}</div>;
 
   if (!fbReady) return wrap(<div style={{ padding: 40, textAlign: "center", color: COLORS.inkSoft, fontSize: 13 }}>กำลังเชื่อมต่อ…</div>);
-  if (fbError) return wrap(<div style={{ padding: 30, color: COLORS.chalk, fontSize: 13, lineHeight: 1.6 }}><div style={{ fontSize: 30, marginBottom: 10 }}>⚠️</div><b>เชื่อมต่อ Firebase ไม่ได้</b><br /><span style={{ color: COLORS.inkSoft }}>{fbError}</span><br /><br />ตรวจว่าใส่ค่า config ครบ, เปิด Anonymous auth, และเพิ่มโดเมนเว็บใน Authorized domains แล้ว (ดู README)</div>);
+  if (fbError) return wrap(<div style={{ padding: 30, color: COLORS.chalk, fontSize: 13, lineHeight: 1.6 }}><div style={{ fontSize: 30, marginBottom: 10 }}>⚠️</div><b>เชื่อมต่อ Firebase ไม่ได้</b><br /><span style={{ color: COLORS.inkSoft }}>{fbError}</span></div>);
   if (!profile) return wrap(<Onboarding onSubmit={createProfile} busy={busy} />);
 
   return (
@@ -415,9 +418,9 @@ function App() {
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
               <button onClick={() => setShowActualEditor(false)} style={{ background: "transparent", border: "none", color: COLORS.goldSoft, fontSize: 14, cursor: "pointer" }}>← กลับ</button>
-              <div style={{ fontSize: 12, color: COLORS.inkSoft }}>กดทีมที่ชนะจริง ระบบจะล็อกให้ทุกคนทันที</div>
+              <div style={{ fontSize: 12, color: COLORS.inkSoft }}>กดทีมที่ชนะจริง (ปกติ auto-updater ทำให้เอง)</div>
             </div>
-            <BracketList pick={actual} actual={actual} nowTs={nowTs} mode="admin" onSelect={selectActual} />
+            <BracketList pick={actual} actual={actual} sched={sched} nowTs={nowTs} mode="admin" onSelect={selectActual} />
           </div>
         ) : tab === "predict" ? (
           viewingFriend ? (
@@ -428,10 +431,10 @@ function App() {
                 <div style={{ fontSize: 13, color: COLORS.chalk, fontWeight: 500 }}>สายของ {viewingFriend.name}</div>
               </div>
               <Legend />
-              <BracketList pick={viewingFriend.selections || {}} actual={actual} nowTs={nowTs} mode="review" onSelect={() => {}} />
+              <BracketList pick={viewingFriend.selections || {}} actual={actual} sched={sched} nowTs={nowTs} mode="review" onSelect={() => {}} />
             </div>
           ) : (
-            <div><Legend /><BracketList pick={selections} actual={actual} nowTs={nowTs} mode="predict" onSelect={selectWinner} /></div>
+            <div><Legend /><BracketList pick={selections} actual={actual} sched={sched} nowTs={nowTs} mode="predict" onSelect={selectWinner} /></div>
           )
         ) : tab === "friends" ? (
           <div>
@@ -454,7 +457,7 @@ function App() {
             </div>
             <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 15, fontWeight: 600, color: COLORS.chalk, textTransform: "uppercase", marginBottom: 14 }}>ใครเล่นบ้าง</div>
             {allPlayers.map((f) => {
-              const s = computeScore(f.selections || {}, actual, nowTs);
+              const s = computeScore(f.selections || {}, actual, sched, nowTs);
               return (
                 <button key={f.id} onClick={() => { setTab("predict"); setViewingFriend(f); }}
                   style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, background: COLORS.navyCard, border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: "12px 14px", marginBottom: 10, cursor: "pointer", textAlign: "left" }}>
